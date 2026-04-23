@@ -1,0 +1,36 @@
+# Recursive Scholar Agent Dependencies
+
+# HippoRAG core dependencies (from HippoRAG/setup.py)
+torch==2.5.1
+transformers==4.45.2
+vllm==0.6.6.post1
+openai==1.91.1
+litellm==1.73.1
+gritlm==1.0.2
+networkx==3.4.2
+python_igraph==0.11.8
+tiktoken==0.7.0
+pydantic==2.10.4
+tenacity==8.5.0
+einops
+tqdm
+boto3
+
+# Neo4j integration
+neo4j==5.18.0
+
+# LlamaCloud for PDF parsing
+llama-cloud
+
+# Mem0 for user memory (optional, can use cloud API)
+mem0ai
+
+# Other utilities
+python-dotenv
+numpy
+faiss-cpu
+jieba
+neo4j
+fastapi==0.116.1
+uvicorn==0.35.0
+python-multipart==0.0.20
