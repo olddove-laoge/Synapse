@@ -49,12 +49,22 @@
 ```bash
 # 基础依赖
 pip install -r requirements.txt
+```
 
-# HippoRAG (本地安装)
+### 2. 获取 HippoRAG 源码
+
+本仓库为了保持比赛交付轻量，**不直接包含 HippoRAG 完整源码**。
+你需要将官方仓库拉到当前项目根目录下的 `HippoRAG/`，因为当前适配器默认从这个路径加载：
+
+```bash
+git clone https://github.com/OSU-NLP-Group/HippoRAG.git HippoRAG
 cd HippoRAG
+git checkout d437bfb1805278b81e20c82357ed3f7d90f14901
 pip install -e .
 cd ..
 ```
+
+如果你已经有本地 `HippoRAG/` 目录，只需确认它位于项目根目录，并完成 `pip install -e ./HippoRAG`。
 
 ### 2. 配置环境变量
 
@@ -158,18 +168,16 @@ PDF → LlamaParse → Markdown → HippoRAG(OpenIE) → Neo4j
 
 ```
 .
-├── config.py                  # 统一配置
-├── ingest_to_neo4j.py         # 主导入脚本
-├── parsed_paper.md            # 已解析的论文
-├── test.py                    # LlamaParse 测试
-├── requirements.txt           # 依赖
-├── .env.example              # 环境变量模板
-├── HippoRAG/                 # HippoRAG 源码
-│   └── src/hipporag/
-└── outputs/                  # 输出目录
-    └── attention_paper/      # 论文索引数据
-        ├── triples.json      # 提取的三元组
-        └── graph.pickle      # igraph 图数据
+├── apps/                      # FastAPI API 入口
+├── packages/                  # ingestion / extraction / retrieval / graph 等实现
+├── openspec/                  # 设计与规格文档
+├── docker-compose.yml         # 比赛版本地 Neo4j 容器
+├── integration_pipeline_test.py
+├── requirements.txt
+├── .env.example
+├── README.md
+└── HippoRAG/                  # 需自行 clone 的官方源码目录（不随本仓库提供）
+    └── src/hipporag/
 ```
 
 ## Synapse API 骨架（已创建）
@@ -214,10 +222,16 @@ uvicorn apps.api.main:app --reload --port 8000
 
 ### HippoRAG 导入错误
 ```bash
-# 确保 HippoRAG 已安装
+# 确保 HippoRAG 已 clone 到项目根目录
+# 并完成可编辑安装
+git clone https://github.com/OSU-NLP-Group/HippoRAG.git HippoRAG
 cd HippoRAG
 pip install -e .
 ```
+
+如果 `packages/extraction/hipporag_openie_adapter.py` 仍报导入问题，请确认：
+- `./HippoRAG/src` 存在
+- 当前 Python 环境里已经执行过 `pip install -e ./HippoRAG`
 
 ### Neo4j 连接失败
 - 确认 Neo4j Desktop 已启动
