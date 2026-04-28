@@ -413,11 +413,64 @@ class LocalEmbeddingRetrievalService:
         evidence = [EvidenceItem(evidence_id=f"ev_{item.chunk_id}", chunk_id=item.chunk_id, score=item.score) for item in retrieved_passages]
         return RetrievalResult(passages=[item.content for item in retrieved_passages], evidence=evidence, retrieved_passages=retrieved_passages)
 
+    def _node_centric_retrieve(self, graph_id: str, node_id: str, query: str) -> RetrievalResult:
+        facts = self._filter_facts_for_graph(self._load_facts(), graph_id=graph_id)
+        related_facts = [
+            fact for fact in facts
+            if fact.source_node_id == node_id or fact.target_node_id == node_id
+        ]
+        if not related_facts:
+            return self._fact_first_retrieve(RetrievalRequest(graph_id=graph_id, query=query, top_k=5))
+
+        local_entity_ids = {node_id}
+        for fact in related_facts:
+            local_entity_ids.add(fact.source_node_id)
+            local_entity_ids.add(fact.target_node_id)
+
+        expanded_facts = [
+            fact for fact in facts
+            if fact.source_node_id in local_entity_ids or fact.target_node_id in local_entity_ids
+        ]
+        fact_items = [(fact.fact_id, fact.fact_text) for fact in expanded_facts]
+        dense_fact_ranking = self._ann_rank_texts(fact_items, query, self.fact_embedding_cache_file_path)
+        sparse_fact_ranking = self._bm25_rank_texts(fact_items, query)
+        fused_fact_ids = self._rrf_fusion(dense_fact_ranking, sparse_fact_ranking)[:12]
+        dense_fact_score_by_id = dict(dense_fact_ranking)
+        reranked_fact_ids = self._rerank_facts(
+            query=query,
+            facts=expanded_facts,
+            fused_fact_ids=fused_fact_ids,
+            dense_fact_score_by_id=dense_fact_score_by_id,
+            limit=8,
+        )
+
+        chunks = self._filter_chunks_for_graph(self._load_chunks(), graph_id=graph_id)
+        chunk_by_id = {chunk.chunk_id: chunk for chunk in chunks}
+        dense_passage_prior = self._chunk_dense_prior(chunks, query)
+        entity_embeddings = self._compute_entity_embeddings(expanded_facts)
+        graph_artifacts = self._get_graph_artifacts(graph_id, expanded_facts, entity_embeddings)
+        chunk_scores = self.hipporag_adapter.rank_passages_with_ppr(
+            facts=expanded_facts,
+            fused_fact_ids=reranked_fact_ids,
+            dense_fact_score_by_id=dense_fact_score_by_id,
+            dense_passage_prior=dense_passage_prior,
+            graph_artifacts=graph_artifacts,
+        ).chunk_scores
+
+        ranked_chunk_ids = [chunk_id for chunk_id, _ in sorted(chunk_scores.items(), key=lambda x: x[1], reverse=True)]
+        top_ids = [chunk_id for chunk_id in ranked_chunk_ids if chunk_id in chunk_by_id][:5]
+        retrieved_passages = [
+            RetrievedPassage(chunk_id=chunk_id, content=chunk_by_id[chunk_id].content, score=float(chunk_scores.get(chunk_id, 0.0)))
+            for chunk_id in top_ids
+        ]
+        evidence = [EvidenceItem(evidence_id=f"ev_{item.chunk_id}", chunk_id=item.chunk_id, score=item.score) for item in retrieved_passages]
+        return RetrievalResult(passages=[item.content for item in retrieved_passages], evidence=evidence, retrieved_passages=retrieved_passages)
+
     def retrieve_for_query(self, req: RetrievalRequest) -> RetrievalResult:
         return self._fact_first_retrieve(req)
 
     def retrieve_for_node(self, graph_id: str, node_id: str, query: str) -> RetrievalResult:
-        return self.retrieve_for_query(RetrievalRequest(graph_id=graph_id, query=query, top_k=5))
+        return self._node_centric_retrieve(graph_id=graph_id, node_id=node_id, query=query)
 
     def update_index(self, graph_id: str, delta: GraphDelta) -> None:
         return None

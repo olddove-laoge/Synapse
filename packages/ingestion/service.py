@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -88,6 +89,8 @@ class LocalDocumentStore:
                 "document_id": chunk.document_id,
                 "graph_id": graph_id_by_document_id.get(chunk.document_id),
                 "content": chunk.content,
+                "section_path": chunk.section_path,
+                "summary": chunk.summary,
             }
         self._save_json(self.dynamic_chunks_file, list(existing_by_id.values()))
 
@@ -140,31 +143,104 @@ class IngestionService:
         return path.read_text(encoding="utf-8", errors="ignore")
 
     def _split_into_chunks(self, document_id: str, text: str, source_type: str) -> list[ParsedChunk]:
-        normalized = " ".join(text.split())
-        if not normalized:
+        lines = [line.rstrip() for line in text.splitlines()]
+        if not any(line.strip() for line in lines):
             return []
 
         chunks: list[ParsedChunk] = []
-        cursor = 0
+        heading_stack: list[tuple[int, str]] = []
+        buffer: list[str] = []
+        start_offset = 0
         index = 0
-        step = max(1, int(self.chunk_size * 0.8))
-        while cursor < len(normalized):
-            piece = normalized[cursor: cursor + self.chunk_size].strip()
-            if not piece:
-                break
-            chunk_id = f"{document_id}_chunk_{index}"
+        offset = 0
+
+        def current_section_path() -> list[str]:
+            return [title for _, title in heading_stack]
+
+        def summarize(content: str, section_path: list[str]) -> str:
+            base = section_path[-1] if section_path else content
+            summary = " ".join(base.split())[:30].strip()
+            return summary or "未命名片段"
+
+        def emit_chunk() -> None:
+            nonlocal buffer, start_offset, index
+            content = "\n".join(line for line in buffer if line.strip()).strip()
+            if not content:
+                buffer = []
+                return
+            section_path = current_section_path()
             chunks.append(
                 ParsedChunk(
-                    chunk_id=chunk_id,
+                    chunk_id=f"{document_id}_chunk_{index}",
                     document_id=document_id,
-                    content=piece,
+                    content=content,
+                    section_path=section_path,
+                    summary=summarize(content, section_path),
                     source_type=source_type,
-                    metadata={"offset": cursor},
+                    metadata={"offset": start_offset},
                 )
             )
-            cursor += step
             index += 1
-        return chunks
+            buffer = []
+
+        for line in lines:
+            stripped = line.strip()
+            heading_level = len(stripped) - len(stripped.lstrip('#')) if stripped.startswith('#') else 0
+            if heading_level > 0 and stripped.lstrip('#').strip():
+                emit_chunk()
+                heading_title = stripped[heading_level:].strip()
+                while heading_stack and heading_stack[-1][0] >= heading_level:
+                    heading_stack.pop()
+                heading_stack.append((heading_level, heading_title))
+                start_offset = offset
+            else:
+                if not buffer:
+                    start_offset = offset
+                buffer.append(line)
+            offset += len(line) + 1
+
+        emit_chunk()
+
+        oversized: list[ParsedChunk] = []
+        for chunk in chunks:
+            words = chunk.content.split()
+            if len(words) <= 280:
+                oversized.append(chunk)
+                continue
+            sentences = [part.strip() for part in re.split(r'(?<=[.!?。！？])\s+', chunk.content) if part.strip()]
+            piece: list[str] = []
+            sub_index = 0
+            for sentence in sentences:
+                candidate = (" ".join(piece + [sentence])).strip()
+                if piece and len(candidate.split()) > 280:
+                    oversized.append(
+                        ParsedChunk(
+                            chunk_id=f"{chunk.chunk_id}_part_{sub_index}",
+                            document_id=document_id,
+                            content=" ".join(piece).strip(),
+                            section_path=chunk.section_path,
+                            summary=chunk.summary,
+                            source_type=source_type,
+                            metadata=chunk.metadata,
+                        )
+                    )
+                    sub_index += 1
+                    piece = [sentence]
+                else:
+                    piece.append(sentence)
+            if piece:
+                oversized.append(
+                    ParsedChunk(
+                        chunk_id=f"{chunk.chunk_id}_part_{sub_index}" if sub_index else chunk.chunk_id,
+                        document_id=document_id,
+                        content=" ".join(piece).strip(),
+                        section_path=chunk.section_path,
+                        summary=chunk.summary,
+                        source_type=source_type,
+                        metadata=chunk.metadata,
+                    )
+                )
+        return oversized
 
     @staticmethod
     def _infer_source_type(filename: str) -> str:

@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Synapse Graph UI</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #0b1020; color: #e5e7eb; }
+    .layout { display: grid; grid-template-columns: 360px 1fr 360px; height: 100vh; }
+    .panel { padding: 16px; border-right: 1px solid #1f2937; overflow: auto; }
+    .panel:last-child { border-right: none; border-left: 1px solid #1f2937; }
+    h2, h3 { margin-top: 0; }
+    input, button, textarea { width: 100%; margin: 8px 0; padding: 10px; border-radius: 8px; border: 1px solid #374151; background: #111827; color: #e5e7eb; box-sizing: border-box; }
+    button { cursor: pointer; background: #2563eb; border: none; }
+    button.secondary { background: #374151; }
+    .graph { position: relative; overflow: hidden; background: radial-gradient(circle at top, #111827, #020617); }
+    #graphCanvas { width: 100%; height: 100%; display: block; }
+    .toolbar { position: absolute; left: 16px; top: 16px; z-index: 5; display: flex; gap: 8px; }
+    .toolbar button { width: auto; padding: 8px 12px; margin: 0; background: rgba(15, 23, 42, 0.9); border: 1px solid #334155; }
+    .legend { position: absolute; left: 16px; bottom: 16px; z-index: 5; background: rgba(15, 23, 42, 0.86); border: 1px solid #334155; border-radius: 10px; padding: 10px 12px; font-size: 12px; color: #cbd5e1; }
+    .status { font-size: 12px; color: #93c5fd; min-height: 18px; }
+    .list { display: grid; gap: 8px; }
+    .card { background: #111827; border: 1px solid #374151; border-radius: 10px; padding: 10px; }
+    .small { font-size: 12px; color: #9ca3af; }
+    .answer { white-space: pre-wrap; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="panel">
+      <h2>文档入口</h2>
+      <label>Workspace ID</label>
+      <input id="workspaceId" value="ws_demo" />
+      <label>Graph ID</label>
+      <input id="graphId" value="g_ui_demo" />
+      <label>上传文档</label>
+      <input id="fileInput" type="file" />
+      <button id="uploadBtn">上传并解析</button>
+      <button id="clearGraphBtn" class="secondary" type="button">清空当前图谱</button>
+      <div class="status" id="uploadStatus"></div>
+
+      <h3>候选审核</h3>
+      <button class="secondary" id="refreshCandidatesBtn">刷新候选</button>
+      <div class="list" id="candidateList"></div>
+    </div>
+
+    <div class="graph">
+      <div class="toolbar">
+        <button id="resetViewBtn" type="button">重置视图</button>
+        <button id="showAllBtn" type="button">显示全图</button>
+      </div>
+      <div class="legend">Canvas 渲染<br>拖动画布平移，滚轮缩放，拖动节点调整布局</div>
+      <canvas id="graphCanvas"></canvas>
+    </div>
+
+    <div class="panel">
+      <h2>节点问答</h2>
+      <div id="selectedNodeCard" class="card">
+        <div class="small">当前未选中节点</div>
+      </div>
+      <label>问答模式</label>
+      <select id="qaModeSelect">
+        <option value="normal">普通问答</option>
+        <option value="agent">递归学习代理</option>
+      </select>
+      <textarea id="questionInput" rows="5" placeholder="点击中间图谱节点后，在这里提问"></textarea>
+      <button id="askBtn">围绕节点提问并扩展枝桠</button>
+      <div class="status" id="askStatus"></div>
+      <div class="card answer" id="answerBox">等待提问</div>
+      <h3>证据引用</h3>
+      <div class="list" id="citationList"></div>
+      <h3>节点笔记</h3>
+      <textarea id="noteInput" rows="3" placeholder="为当前节点添加一条笔记"></textarea>
+      <button id="saveNoteBtn">保存笔记</button>
+      <div class="list" id="noteList"></div>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      documentId: null,
+      selectedNode: null,
+      graph: { nodes: [], edges: [] },
+      positions: new Map(),
+      zoom: 1,
+      panX: 0,
+      panY: 0,
+      targetZoom: 1,
+      targetPanX: 0,
+      targetPanY: 0,
+      draggingNodeId: null,
+      isPanning: false,
+      lastPointer: null,
+      showAll: false,
+      hitNodes: [],
+      layoutKey: '',
+      animationFrame: null,
+    };
+
+    const canvas = document.getElementById('graphCanvas');
+    const ctx = canvas.getContext('2d');
+    const uploadStatus = document.getElementById('uploadStatus');
+    const askStatus = document.getElementById('askStatus');
+
+    function getGraphId() { return document.getElementById('graphId').value.trim(); }
+    function getWorkspaceId() { return document.getElementById('workspaceId').value.trim(); }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, options);
+      if (!response.ok) throw new Error(await response.text());
+      return response.json();
+    }
+
+    function setStatus(el, text) { el.textContent = text; }
+
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+      canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      renderGraph();
+    }
+
+    async function uploadAndParse() {
+      const file = document.getElementById('fileInput').files[0];
+      if (!file) return setStatus(uploadStatus, '请先选择文件');
+      setStatus(uploadStatus, '上传中...');
+      const form = new FormData();
+      form.append('file', file);
+      form.append('workspace_id', getWorkspaceId());
+      form.append('graph_id', getGraphId());
+      const upload = await api('/api/v1/documents/upload', { method: 'POST', body: form });
+      state.documentId = upload.document_id;
+      setStatus(uploadStatus, `上传完成：${upload.document_id}，解析中...`);
+      const parse = await api(`/api/v1/documents/${upload.document_id}/parse`, { method: 'POST' });
+      setStatus(uploadStatus, `解析完成，chunks=${parse.chunk_count}`);
+      await refreshCandidates();
+      await autoPublishLatest();
+      await loadGraph();
+    }
+
+    async function refreshCandidates() {
+      const graphId = getGraphId();
+      const rows = await api(`/api/v1/graphs/${graphId}/candidates?status=draft&limit=20&offset=0`);
+      const list = document.getElementById('candidateList');
+      list.innerHTML = '';
+      rows.forEach(row => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `<div><strong>${row.source}</strong></div><div class="small">${row.candidate_delta_id}</div><div class="small">nodes=${row.delta.nodes.length}, edges=${row.delta.edges.length}</div><button data-id="${row.candidate_delta_id}">审核并发布</button>`;
+        card.querySelector('button').onclick = async () => {
+          await reviewAndPublish(row.candidate_delta_id);
+          await refreshCandidates();
+          await loadGraph();
+        };
+        list.appendChild(card);
+      });
+    }
+
+    async function reviewAndPublish(candidateId) {
+      const graphId = getGraphId();
+      await api(`/api/v1/graphs/${graphId}/candidates/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidate_ids: [candidateId], action: 'approve' })
+      });
+      await api(`/api/v1/graphs/${graphId}/candidates/publish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidate_ids: [candidateId] })
+      });
+    }
+
+    async function autoPublishLatest() {
+      const graphId = getGraphId();
+      const rows = await api(`/api/v1/graphs/${graphId}/candidates?status=draft&limit=20&offset=0`);
+      if (!rows.length) return;
+      await reviewAndPublish(rows[rows.length - 1].candidate_delta_id);
+      await refreshCandidates();
+    }
+
+    async function loadGraph() {
+      const graphId = getGraphId();
+      state.graph = await api(`/api/v1/graphs/${graphId}`);
+      if (!state.selectedNode && state.graph.nodes.length) state.selectedNode = state.graph.nodes[0];
+      markLayoutDirty();
+      renderGraph();
+    }
+
+    function mergeNodes(existing, incoming) {
+      const map = new Map(existing.map(n => [n.node_id, n]));
+      incoming.forEach(n => map.set(n.node_id, n));
+      return [...map.values()];
+    }
+
+    function mergeEdges(existing, incoming) {
+      const map = new Map(existing.map(e => [e.edge_id, e]));
+      incoming.forEach(e => map.set(e.edge_id, e));
+      return [...map.values()];
+    }
+
+    function filteredGraph() {
+      if (state.showAll || !state.selectedNode) return state.graph;
+      const centerId = state.selectedNode.node_id;
+      const relatedEdges = state.graph.edges.filter(edge => edge.source_node_id === centerId || edge.target_node_id === centerId);
+      const nodeIds = new Set([centerId]);
+      relatedEdges.forEach(edge => { nodeIds.add(edge.source_node_id); nodeIds.add(edge.target_node_id); });
+      return {
+        nodes: state.graph.nodes.filter(node => nodeIds.has(node.node_id)),
+        edges: relatedEdges,
+      };
+    }
+
+    function markLayoutDirty() {
+      state.layoutKey = '';
+    }
+
+    function initializePositions(nodes) {
+      const width = canvas.clientWidth || 900;
+      const height = canvas.clientHeight || window.innerHeight;
+      const centerX = width / 2;
+      const centerY = height / 2;
+      nodes.forEach((node, idx) => {
+        if (state.positions.has(node.node_id)) return;
+        const angle = (Math.PI * 2 * idx) / Math.max(1, nodes.length);
+        const radius = 80 + (idx % 5) * 30;
+        state.positions.set(node.node_id, {
+          x: centerX + radius * Math.cos(angle),
+          y: centerY + radius * Math.sin(angle),
+          vx: 0,
+          vy: 0,
+        });
+      });
+    }
+
+    function runLayout(nodes, edges) {
+      const key = JSON.stringify({
+        showAll: state.showAll,
+        selected: state.selectedNode?.node_id || '',
+        nodes: nodes.map(n => n.node_id),
+        edges: edges.map(e => e.edge_id),
+      });
+      if (key === state.layoutKey) return;
+      state.layoutKey = key;
+      initializePositions(nodes);
+      const width = canvas.clientWidth || 900;
+      const height = canvas.clientHeight || window.innerHeight;
+      const centerX = width / 2;
+      const centerY = height / 2;
+      for (let step = 0; step < 120; step++) {
+        for (let i = 0; i < nodes.length; i++) {
+          const a = state.positions.get(nodes[i].node_id);
+          if (!a) continue;
+          for (let j = i + 1; j < nodes.length; j++) {
+            const b = state.positions.get(nodes[j].node_id);
+            if (!b) continue;
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let dist = Math.hypot(dx, dy) || 1;
+            const force = 2600 / dist;
+            const ux = dx / dist;
+            const uy = dy / dist;
+            a.vx -= ux * force * 0.001;
+            a.vy -= uy * force * 0.001;
+            b.vx += ux * force * 0.001;
+            b.vy += uy * force * 0.001;
+          }
+        }
+        edges.forEach(edge => {
+          const a = state.positions.get(edge.source_node_id);
+          const b = state.positions.get(edge.target_node_id);
+          if (!a || !b) return;
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          let dist = Math.hypot(dx, dy) || 1;
+          const desired = state.selectedNode && (edge.source_node_id === state.selectedNode.node_id || edge.target_node_id === state.selectedNode.node_id) ? 110 : 170;
+          const spring = (dist - desired) * 0.01;
+          const ux = dx / dist;
+          const uy = dy / dist;
+          a.vx += ux * spring;
+          a.vy += uy * spring;
+          b.vx -= ux * spring;
+          b.vy -= uy * spring;
+        });
+        nodes.forEach(node => {
+          const pos = state.positions.get(node.node_id);
+          if (!pos || state.draggingNodeId === node.node_id) return;
+          pos.vx += (centerX - pos.x) * 0.0008;
+          pos.vy += (centerY - pos.y) * 0.0008;
+          pos.x += pos.vx;
+          pos.y += pos.vy;
+          pos.vx *= 0.85;
+          pos.vy *= 0.85;
+        });
+      }
+    }
+
+    function nodeColor(node) {
+      const type = (node.node_type || 'Concept').toLowerCase();
+      if (type.includes('question')) return '#f59e0b';
+      if (type.includes('insight')) return '#10b981';
+      if (type.includes('metric')) return '#8b5cf6';
+      if (type.includes('method')) return '#06b6d4';
+      return '#1d4ed8';
+    }
+
+    function edgeColor(edge) {
+      const rel = (edge.relation_type || '').toLowerCase();
+      if (rel.includes('depends') || rel.includes('requires')) return '#e0b483';
+      if (rel.includes('causes') || rel.includes('leads') || rel.includes('prevents')) return '#da8c84';
+      if (rel.includes('uses') || rel.includes('applies') || rel.includes('consists')) return '#8fcf8a';
+      if (rel.includes('similar')) return '#c39be0';
+      return '#aab8ca';
+    }
+
+    function nodeRadius(node, degree, isSelected) {
+      const base = isSelected ? 34 : 18 + Math.min(8, degree);
+      const minRadius = isSelected ? 10 : 5;
+      const maxRadius = isSelected ? 40 : 28;
+      const scaled = base * Math.sqrt(Math.max(state.zoom, 0.35));
+      return Math.max(minRadius, Math.min(maxRadius, scaled));
+    }
+
+    function toViewport(pos) {
+      return {
+        x: pos.x * state.zoom + state.panX,
+        y: pos.y * state.zoom + state.panY,
+      };
+    }
+
+    function animateCamera() {
+      if (state.animationFrame) cancelAnimationFrame(state.animationFrame);
+      const tick = () => {
+        const dx = state.targetPanX - state.panX;
+        const dy = state.targetPanY - state.panY;
+        const dz = state.targetZoom - state.zoom;
+        state.panX += dx * 0.18;
+        state.panY += dy * 0.18;
+        state.zoom += dz * 0.18;
+        renderGraph();
+        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(dz) < 0.01) {
+          state.panX = state.targetPanX;
+          state.panY = state.targetPanY;
+          state.zoom = state.targetZoom;
+          renderGraph();
+          state.animationFrame = null;
+          return;
+        }
+        state.animationFrame = requestAnimationFrame(tick);
+      };
+      state.animationFrame = requestAnimationFrame(tick);
+    }
+
+    function renderGraph() {
+      const width = canvas.clientWidth || 900;
+      const height = canvas.clientHeight || window.innerHeight;
+      ctx.clearRect(0, 0, width, height);
+      const subgraph = filteredGraph();
+      runLayout(subgraph.nodes, subgraph.edges);
+      state.hitNodes = [];
+
+      subgraph.edges.forEach(edge => {
+        const a0 = state.positions.get(edge.source_node_id);
+        const b0 = state.positions.get(edge.target_node_id);
+        if (!a0 || !b0) return;
+        const a = toViewport(a0);
+        const b = toViewport(b0);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.strokeStyle = edgeColor(edge);
+        ctx.lineWidth = state.selectedNode && (edge.source_node_id === state.selectedNode.node_id || edge.target_node_id === state.selectedNode.node_id) ? 3 : 1.5;
+        ctx.stroke();
+        if (state.selectedNode && (edge.source_node_id === state.selectedNode.node_id || edge.target_node_id === state.selectedNode.node_id)) {
+          ctx.fillStyle = '#94a3b8';
+          ctx.font = '12px Arial';
+          ctx.textAlign = 'center';
+          ctx.fillText(edge.relation_type, (a.x + b.x) / 2, (a.y + b.y) / 2 - 8);
+        }
+      });
+
+      subgraph.nodes.forEach(node => {
+        const pos0 = state.positions.get(node.node_id);
+        if (!pos0) return;
+        const pos = toViewport(pos0);
+        const isSelected = state.selectedNode?.node_id === node.node_id;
+        const degree = subgraph.edges.filter(edge => edge.source_node_id === node.node_id || edge.target_node_id === node.node_id).length;
+        const radius = nodeRadius(node, degree, isSelected);
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = isSelected ? '#38bdf8' : nodeColor(node);
+        ctx.fill();
+        const shouldLabel = isSelected || degree >= 2 || (!state.showAll && state.zoom >= 0.75);
+        if (shouldLabel) {
+          ctx.fillStyle = '#e2e8f0';
+          ctx.font = isSelected ? '13px Arial' : '11px Arial';
+          ctx.textAlign = 'center';
+          ctx.fillText(node.title.slice(0, 18), pos.x, pos.y - radius - 8);
+        }
+        state.hitNodes.push({ node, x: pos.x, y: pos.y, radius });
+      });
+    }
+
+    async function selectNode(node) {
+      state.selectedNode = node;
+      state.showAll = false;
+      document.getElementById('selectedNodeCard').innerHTML = `<div><strong>${node.title}</strong></div><div class="small">${node.node_type} · ${node.node_id}</div><div class="small" style="margin-top:8px;line-height:1.5;">${node.summary || '摘要生成中...'}</div>`;
+      markLayoutDirty();
+      renderGraph();
+      const pos = state.positions.get(node.node_id);
+      if (pos) {
+        const width = canvas.clientWidth || 900;
+        const height = canvas.clientHeight || window.innerHeight;
+        state.targetZoom = 1.18;
+        state.targetPanX = width / 2 - pos.x * state.targetZoom;
+        state.targetPanY = height / 2 - pos.y * state.targetZoom;
+        animateCamera();
+      }
+      await loadNodeNotes(node.node_id);
+      if (!node.summary) {
+        try {
+          const enriched = await api(`/api/v1/graphs/${getGraphId()}/nodes/${encodeURIComponent(node.node_id)}/summarize`, { method: 'POST' });
+          const match = state.graph.nodes.find(n => n.node_id === node.node_id);
+          if (match) match.summary = enriched.summary;
+          if (state.selectedNode && state.selectedNode.node_id === node.node_id) {
+            state.selectedNode.summary = enriched.summary;
+            document.getElementById('selectedNodeCard').innerHTML = `<div><strong>${node.title}</strong></div><div class="small">${node.node_type} · ${node.node_id}</div><div class="small" style="margin-top:8px;line-height:1.5;">${enriched.summary || '暂无摘要'}</div>`;
+          }
+        } catch (err) {
+          if (state.selectedNode && state.selectedNode.node_id === node.node_id) {
+            document.getElementById('selectedNodeCard').innerHTML = `<div><strong>${node.title}</strong></div><div class="small">${node.node_type} · ${node.node_id}</div><div class="small" style="margin-top:8px;line-height:1.5;">摘要生成失败</div>`;
+          }
+        }
+      }
+    }
+
+    async function loadNodeNotes(nodeId) {
+      const rows = await api(`/api/v1/nodes/${encodeURIComponent(nodeId)}/notes`);
+      const noteList = document.getElementById('noteList');
+      noteList.innerHTML = '';
+      rows.forEach(note => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `<div class="small">${note.note_id}</div><div>${note.content}</div>`;
+        noteList.appendChild(card);
+      });
+    }
+
+    async function saveNodeNote() {
+      if (!state.selectedNode) return setStatus(askStatus, '请先点击图谱节点');
+      const content = document.getElementById('noteInput').value.trim();
+      if (!content) return setStatus(askStatus, '请输入笔记内容');
+      await api(`/api/v1/nodes/${encodeURIComponent(state.selectedNode.node_id)}/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content })
+      });
+      document.getElementById('noteInput').value = '';
+      await loadNodeNotes(state.selectedNode.node_id);
+      setStatus(askStatus, '笔记已保存');
+    }
+
+    async function askNode() {
+      if (!state.selectedNode) return setStatus(askStatus, '请先点击图谱节点');
+      const question = document.getElementById('questionInput').value.trim();
+      if (!question) return setStatus(askStatus, '请输入问题');
+      setStatus(askStatus, '提问中...');
+      const body = {
+        workspace_id: getWorkspaceId(),
+        graph_id: getGraphId(),
+        user_id: 'ui_demo',
+        node_id: state.selectedNode.node_id,
+        message: question,
+      };
+      const mode = document.getElementById('qaModeSelect').value;
+      const citationList = document.getElementById('citationList');
+      citationList.innerHTML = '';
+
+      if (mode === 'agent') {
+        const result = await api('/api/v1/chat/node/agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        document.getElementById('answerBox').textContent = result.agent_output || '未返回代理分析';
+        setStatus(askStatus, '递归学习代理完成');
+        return;
+      }
+
+      const result = await api('/api/v1/chat/node', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      document.getElementById('answerBox').textContent = result.answer;
+      result.citations.forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `<div class="small">${item.chunk_id}</div><div>score=${item.score.toFixed(3)}</div>`;
+        citationList.appendChild(card);
+      });
+      const focus = await api(`/api/v1/graphs/${getGraphId()}/focus?node_id=${encodeURIComponent(state.selectedNode.node_id)}`);
+      state.graph.nodes = mergeNodes(state.graph.nodes, focus.nodes);
+      state.graph.edges = mergeEdges(state.graph.edges, focus.edges);
+      markLayoutDirty();
+      renderGraph();
+      setStatus(askStatus, '完成');
+    }
+
+    function pickNode(clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
+      return state.hitNodes.find(item => Math.hypot(item.x - x, item.y - y) <= item.radius)?.node || null;
+    }
+
+    canvas.addEventListener('wheel', event => {
+      event.preventDefault();
+      if (state.animationFrame) cancelAnimationFrame(state.animationFrame);
+      const delta = event.deltaY < 0 ? 1.08 : 0.92;
+      state.zoom = Math.max(0.35, Math.min(2.4, state.zoom * delta));
+      state.targetZoom = state.zoom;
+      renderGraph();
+    });
+
+    canvas.addEventListener('pointerdown', event => {
+      if (state.animationFrame) cancelAnimationFrame(state.animationFrame);
+      const hit = pickNode(event.clientX, event.clientY);
+      state.lastPointer = { x: event.clientX, y: event.clientY };
+      if (hit) {
+        state.draggingNodeId = hit.node_id;
+        selectNode(hit);
+        return;
+      }
+      state.isPanning = true;
+    });
+
+    window.addEventListener('pointermove', event => {
+      if (state.draggingNodeId) {
+        const pos = state.positions.get(state.draggingNodeId);
+        if (pos) {
+          pos.x += (event.clientX - state.lastPointer.x) / state.zoom;
+          pos.y += (event.clientY - state.lastPointer.y) / state.zoom;
+          state.lastPointer = { x: event.clientX, y: event.clientY };
+          renderGraph();
+        }
+        return;
+      }
+      if (state.isPanning) {
+        state.panX += event.clientX - state.lastPointer.x;
+        state.panY += event.clientY - state.lastPointer.y;
+        state.lastPointer = { x: event.clientX, y: event.clientY };
+        renderGraph();
+      }
+    });
+
+    window.addEventListener('pointerup', () => {
+      state.draggingNodeId = null;
+      state.isPanning = false;
+    });
+
+    document.getElementById('resetViewBtn').onclick = () => {
+      state.targetZoom = 1;
+      state.targetPanX = 0;
+      state.targetPanY = 0;
+      animateCamera();
+    };
+    document.getElementById('showAllBtn').onclick = () => {
+      state.showAll = !state.showAll; markLayoutDirty(); renderGraph();
+    };
+    document.getElementById('clearGraphBtn').onclick = async () => {
+      try {
+        await api(`/api/v1/graphs/${getGraphId()}`, { method: 'DELETE' });
+        state.graph = { nodes: [], edges: [] };
+        state.positions.clear();
+        state.selectedNode = null;
+        document.getElementById('selectedNodeCard').innerHTML = '<div class="small">当前未选中节点</div>';
+        document.getElementById('answerBox').textContent = '等待提问';
+        document.getElementById('citationList').innerHTML = '';
+        document.getElementById('noteList').innerHTML = '';
+        document.getElementById('noteInput').value = '';
+        await refreshCandidates();
+        markLayoutDirty();
+        renderGraph();
+        setStatus(uploadStatus, '当前图谱已清空');
+      } catch (err) {
+        setStatus(uploadStatus, String(err));
+      }
+    };
+    document.getElementById('uploadBtn').onclick = () => uploadAndParse().catch(err => setStatus(uploadStatus, String(err)));
+    document.getElementById('refreshCandidatesBtn').onclick = () => refreshCandidates().catch(err => setStatus(uploadStatus, String(err)));
+    document.getElementById('askBtn').onclick = () => askNode().catch(err => setStatus(askStatus, String(err)));
+    document.getElementById('saveNoteBtn').onclick = () => saveNodeNote().catch(err => setStatus(askStatus, String(err)));
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    loadGraph().catch(() => {});
+    refreshCandidates().catch(() => {});
+  </script>
+</body>
+</html>

@@ -3,7 +3,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from packages.contracts.graph import FocusGraphResponse, GraphNodeCreate, GraphEdgeCreate, PublishCandidatesResponse
+from packages.contracts.graph import FocusGraphResponse, GraphNode, PublishCandidatesResponse
 from packages.graph.service import LocalGraphService
 
 
@@ -20,19 +20,25 @@ class CandidatePublishRequest(BaseModel):
     candidate_ids: list[str]
 
 
+@router.delete("/graphs/{graph_id}")
+def clear_graph(graph_id: str) -> dict[str, str]:
+    _graph_service.clear_graph(graph_id=graph_id)
+    return {"graph_id": graph_id, "status": "cleared"}
+
+
+@router.get("/graphs/{graph_id}", response_model=FocusGraphResponse)
+def graph_view(graph_id: str) -> FocusGraphResponse:
+    return _graph_service.graph_view(graph_id=graph_id)
+
+
 @router.get("/graphs/{graph_id}/focus", response_model=FocusGraphResponse)
 def graph_focus(graph_id: str, node_id: str) -> FocusGraphResponse:
-    return FocusGraphResponse(graph_id=graph_id, center_node_id=node_id, nodes=[], edges=[])
+    return _graph_service.focus_view(graph_id=graph_id, node_id=node_id)
 
 
-@router.post("/graphs/{graph_id}/nodes")
-def create_node(graph_id: str, req: GraphNodeCreate) -> dict[str, str]:
-    return {"graph_id": graph_id, "node_id": req.node_id}
-
-
-@router.post("/graphs/{graph_id}/edges")
-def create_edge(graph_id: str, req: GraphEdgeCreate) -> dict[str, str]:
-    return {"graph_id": graph_id, "edge_id": req.edge_id}
+@router.post("/graphs/{graph_id}/nodes/{node_id}/summarize", response_model=GraphNode)
+def summarize_node(graph_id: str, node_id: str) -> GraphNode:
+    return _graph_service.summarize_node(graph_id=graph_id, node_id=node_id)
 
 
 @router.get("/graphs/{graph_id}/candidates")

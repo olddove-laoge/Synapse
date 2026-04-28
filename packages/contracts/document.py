@@ -17,6 +17,7 @@ class ParsedChunk(BaseModel):
     document_id: str
     content: str
     section_path: list[str] = []
+    summary: str = ""
     page_start: int | None = None
     page_end: int | None = None
     source_type: Literal["pdf", "docx", "web", "chat", "md", "txt"]

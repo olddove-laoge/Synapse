@@ -10,6 +10,7 @@ class GraphNode(BaseModel):
     node_id: str
     title: str
     node_type: str
+    summary: str = ""
     confidence: float | None = None
 
 
@@ -23,6 +24,11 @@ class GraphEdge(BaseModel):
 
 class GraphNodeCreate(BaseModel):
     node_id: str
+    title: str
+    node_type: str
+
+
+class GraphNodePatch(BaseModel):
     title: str
     node_type: str
 
@@ -66,6 +72,7 @@ class CandidateNode(BaseModel):
     node_id: str
     title: str
     node_type: str
+    summary: str = ""
     status: CandidateStatus = "draft"
 
 

@@ -7,8 +7,9 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from packages.common.config import app_config
-from packages.contracts.graph import FactRecord, FocusGraphResponse, GraphDelta, PublishCandidatesResponse, PublishSkippedItem
+from packages.contracts.graph import FactRecord, FocusGraphResponse, GraphDelta, GraphEdge, GraphNode, PublishCandidatesResponse, PublishSkippedItem
 from packages.graph.neo4j_store import Neo4jGraphStore
+from packages.llm.deepseek_client import DeepSeekClient
 from packages.retrieval.service import LocalEmbeddingRetrievalService
 
 
@@ -36,6 +37,12 @@ class GraphService(Protocol):
     def apply_delta(self, graph_id: str, delta: GraphDelta, source: str = "chat") -> str: ...
 
     def focus_view(self, graph_id: str, node_id: str) -> FocusGraphResponse: ...
+
+    def graph_view(self, graph_id: str) -> FocusGraphResponse: ...
+
+    def summarize_node(self, graph_id: str, node_id: str) -> GraphNode: ...
+
+    def clear_graph(self, graph_id: str) -> None: ...
 
     def review_candidates(self, graph_id: str, ids: list[str], action: str) -> ReviewResult: ...
 
@@ -95,8 +102,109 @@ class LocalGraphService:
         self._save_json(self.candidates_file, rows)
         return candidate_delta_id
 
+    def graph_view(self, graph_id: str) -> FocusGraphResponse:
+        graph_rows = self._load_json(self.graph_store_file)
+        node_map: dict[str, dict] = {}
+        edge_map: dict[str, dict] = {}
+        for row in graph_rows:
+            if row.get("graph_id") != graph_id:
+                continue
+            delta = row.get("delta", {})
+            for node in delta.get("nodes", []):
+                node_map[node["node_id"]] = {
+                    "node_id": node["node_id"],
+                    "title": node.get("title", ""),
+                    "node_type": node.get("node_type", "Concept"),
+                    "summary": node.get("summary", ""),
+                }
+            for edge in delta.get("edges", []):
+                edge_map[edge["edge_id"]] = {
+                    "edge_id": edge["edge_id"],
+                    "source_node_id": edge["source_node_id"],
+                    "target_node_id": edge["target_node_id"],
+                    "relation_type": edge.get("relation_type", "related_to"),
+                }
+        return FocusGraphResponse(
+            graph_id=graph_id,
+            center_node_id="",
+            nodes=[GraphNode(**node) for node in node_map.values()],
+            edges=[GraphEdge(**edge) for edge in edge_map.values()],
+        )
+
     def focus_view(self, graph_id: str, node_id: str) -> FocusGraphResponse:
-        return FocusGraphResponse(graph_id=graph_id, center_node_id=node_id, nodes=[], edges=[])
+        graph_view = self.graph_view(graph_id)
+        related_edges = [
+            edge for edge in graph_view.edges
+            if edge.source_node_id == node_id or edge.target_node_id == node_id
+        ]
+        related_node_ids = {node_id}
+        for edge in related_edges:
+            related_node_ids.add(edge.source_node_id)
+            related_node_ids.add(edge.target_node_id)
+        related_nodes = [node for node in graph_view.nodes if node.node_id in related_node_ids]
+        return FocusGraphResponse(
+            graph_id=graph_id,
+            center_node_id=node_id,
+            nodes=related_nodes,
+            edges=related_edges,
+        )
+
+    def summarize_node(self, graph_id: str, node_id: str) -> GraphNode:
+        graph_rows = self._load_json(self.graph_store_file)
+        dynamic_rows = self._load_json(self.dynamic_chunks_file)
+        chunk_by_id = {row.get('chunk_id'): row for row in dynamic_rows if row.get('graph_id') == graph_id}
+
+        target_node = None
+        related_edge_texts: list[str] = []
+        evidence_snippets: list[str] = []
+        for row in graph_rows:
+            if row.get('graph_id') != graph_id:
+                continue
+            delta = row.get('delta', {})
+            nodes = {node.get('node_id'): node for node in delta.get('nodes', [])}
+            if node_id in nodes:
+                target_node = nodes[node_id]
+            for edge in delta.get('edges', []):
+                if edge.get('source_node_id') == node_id or edge.get('target_node_id') == node_id:
+                    source_title = nodes.get(edge.get('source_node_id'), {}).get('title', edge.get('source_node_id', ''))
+                    target_title = nodes.get(edge.get('target_node_id'), {}).get('title', edge.get('target_node_id', ''))
+                    related_edge_texts.append(f"{source_title} {edge.get('relation_type', 'related_to')} {target_title}")
+            if node_id in nodes:
+                for item in delta.get('evidence', [])[:3]:
+                    chunk_id = item.get('chunk_id')
+                    if chunk_id and chunk_id in chunk_by_id:
+                        snippet = chunk_by_id[chunk_id].get('content', '')[:220]
+                        if snippet:
+                            evidence_snippets.append(snippet)
+        if target_node is None:
+            raise ValueError(f'Node not found: {node_id}')
+
+        if target_node.get('summary'):
+            return GraphNode(
+                node_id=target_node['node_id'],
+                title=target_node.get('title', ''),
+                node_type=target_node.get('node_type', 'Concept'),
+                summary=target_node.get('summary', ''),
+            )
+
+        prompt = (
+            'You are writing a concise study-note summary for a knowledge graph node. '
+            'Summarize what this concept is and why it matters in at most 60 Chinese characters. '
+            'Be factual and avoid markdown.\n\n'
+            f"Node: {target_node.get('title', '')}\n"
+            f"Type: {target_node.get('node_type', 'Concept')}\n"
+            f"Related facts: {related_edge_texts[:5]}\n"
+            f"Evidence: {evidence_snippets[:3]}"
+        )
+        summary = DeepSeekClient().chat(prompt).strip()
+        target_node['summary'] = summary[:120]
+        self._save_json(self.graph_store_file, graph_rows)
+        return GraphNode(
+            node_id=target_node['node_id'],
+            title=target_node.get('title', ''),
+            node_type=target_node.get('node_type', 'Concept'),
+            summary=target_node.get('summary', ''),
+        )
 
     def review_candidates(self, graph_id: str, ids: list[str], action: str) -> ReviewResult:
         if action not in {"approve", "reject"}:
@@ -168,6 +276,16 @@ class LocalGraphService:
         if status is not None:
             records = [record for record in records if record.status == status]
         return records[offset: offset + limit]
+
+    def clear_graph(self, graph_id: str) -> None:
+        candidate_rows = [row for row in self._load_json(self.candidates_file) if row.get('graph_id') != graph_id]
+        graph_rows = [row for row in self._load_json(self.graph_store_file) if row.get('graph_id') != graph_id]
+        dynamic_rows = [row for row in self._load_json(self.dynamic_chunks_file) if row.get('graph_id') != graph_id]
+        fact_rows = [row for row in self._load_json(self.facts_file) if row.get('graph_id') != graph_id]
+        self._save_json(self.candidates_file, candidate_rows)
+        self._save_json(self.graph_store_file, graph_rows)
+        self._save_json(self.dynamic_chunks_file, dynamic_rows)
+        self._save_json(self.facts_file, fact_rows)
 
     def _materialize_published_facts(self, graph_id: str, candidate_ids: list[str]) -> None:
         graph_rows = self._load_json(self.graph_store_file)

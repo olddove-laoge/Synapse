@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from packages.agent.llamaindex_agent import LearningPathAgent
 from packages.contracts.chat import ChatRequest, ChatResponse, NodeChatRequest
 from packages.contracts.retrieval import RetrievalRequest
 from packages.extraction.service import LocalExtractionService
@@ -12,6 +13,7 @@ router = APIRouter()
 _retrieval_service: LocalEmbeddingRetrievalService | None = None
 _extraction_service = LocalExtractionService()
 _graph_service = LocalGraphService()
+_learning_agent = LearningPathAgent()
 
 
 def get_retrieval_service() -> LocalEmbeddingRetrievalService:
@@ -59,6 +61,18 @@ def chat(req: ChatRequest) -> ChatResponse:
     )
 
 
+@router.post('/chat/node/agent')
+def chat_node_agent(req: NodeChatRequest) -> dict:
+    try:
+        return _learning_agent.run_node_learning_agent(
+            graph_id=req.graph_id,
+            node_id=req.node_id,
+            question=req.message,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f'Node learning agent failed: {exc}') from exc
+
+
 @router.post("/chat/node", response_model=ChatResponse)
 def chat_node(req: NodeChatRequest) -> ChatResponse:
     try:
@@ -68,8 +82,16 @@ def chat_node(req: NodeChatRequest) -> ChatResponse:
             node_id=req.node_id,
             query=req.message,
         )
+        focus = _graph_service.focus_view(graph_id=req.graph_id, node_id=req.node_id)
+        center_node = next((node for node in focus.nodes if node.node_id == req.node_id), None)
         context_block = "\n\n".join(
             [f"[{idx + 1}] {passage.content}" for idx, passage in enumerate(retrieval.retrieved_passages)]
+        )
+        relation_block = "\n".join(
+            [
+                f"- {edge.source_node_id} {edge.relation_type} {edge.target_node_id}"
+                for edge in focus.edges[:8]
+            ]
         )
 
         client = DeepSeekClient()
@@ -77,7 +99,9 @@ def chat_node(req: NodeChatRequest) -> ChatResponse:
             message=(
                 "You are handling node-centric QA.\n"
                 "First answer from retrieved context; if insufficient, append a short '模型补充'.\n\n"
-                f"Node ID:\n{req.node_id}\n\n"
+                f"Focus Node Title:\n{center_node.title if center_node else req.node_id}\n\n"
+                f"Focus Node Summary:\n{(center_node.summary if center_node else '') or '暂无摘要'}\n\n"
+                f"Local Relations:\n{relation_block or '暂无关系'}\n\n"
                 f"Retrieved Context:\n{context_block}\n\n"
                 f"User Question:\n{req.message}"
             ),
