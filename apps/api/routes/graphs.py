@@ -3,7 +3,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from packages.contracts.graph import FocusGraphResponse, GraphNode, PublishCandidatesResponse
+from packages.contracts.graph import FocusGraphResponse, GraphNode, GraphNodeCreate, GraphEdgeCreate, PublishCandidatesResponse
 from packages.graph.service import LocalGraphService
 
 
@@ -39,6 +39,18 @@ def graph_focus(graph_id: str, node_id: str) -> FocusGraphResponse:
 @router.post("/graphs/{graph_id}/nodes/{node_id}/summarize", response_model=GraphNode)
 def summarize_node(graph_id: str, node_id: str) -> GraphNode:
     return _graph_service.summarize_node(graph_id=graph_id, node_id=node_id)
+
+
+@router.post('/graphs/{graph_id}/nodes')
+def create_node(graph_id: str, req: GraphNodeCreate) -> dict:
+    node_id = _graph_service.create_manual_node(graph_id, req.node_id, req.title, req.node_type, req.summary)
+    return {'graph_id': graph_id, 'node_id': node_id}
+
+
+@router.post('/graphs/{graph_id}/edges')
+def create_edge(graph_id: str, req: GraphEdgeCreate) -> dict:
+    edge_id = _graph_service.create_manual_edge(graph_id, req.edge_id, req.source_node_id, req.target_node_id, req.relation_type)
+    return {'graph_id': graph_id, 'edge_id': edge_id}
 
 
 @router.get("/graphs/{graph_id}/candidates")

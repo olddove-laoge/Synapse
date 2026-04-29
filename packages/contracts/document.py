@@ -34,3 +34,17 @@ class ParseDocumentResponse(BaseModel):
     job_id: str
     status: Literal["queued", "running", "completed", "failed"]
     chunk_count: int = 0
+
+
+class ManualChunkCreate(BaseModel):
+    title: str
+    content: str
+    linked_node_ids: list[str] = []
+
+
+class ManualChunkResponse(BaseModel):
+    chunk_id: str
+    graph_id: str
+    title: str
+    content: str
+    linked_node_ids: list[str] = []

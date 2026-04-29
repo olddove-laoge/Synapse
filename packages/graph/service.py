@@ -42,6 +42,10 @@ class GraphService(Protocol):
 
     def summarize_node(self, graph_id: str, node_id: str) -> GraphNode: ...
 
+    def create_manual_node(self, graph_id: str, node_id: str, title: str, node_type: str, summary: str = "") -> str: ...
+
+    def create_manual_edge(self, graph_id: str, edge_id: str, source_node_id: str, target_node_id: str, relation_type: str) -> str: ...
+
     def clear_graph(self, graph_id: str) -> None: ...
 
     def review_candidates(self, graph_id: str, ids: list[str], action: str) -> ReviewResult: ...
@@ -101,6 +105,56 @@ class LocalGraphService:
         rows.append(record.model_dump())
         self._save_json(self.candidates_file, rows)
         return candidate_delta_id
+
+    def create_manual_node(self, graph_id: str, node_id: str, title: str, node_type: str, summary: str = "") -> str:
+        graph_rows = self._load_json(self.graph_store_file)
+        graph_rows.append(
+            {
+                'graph_id': graph_id,
+                'candidate_delta_id': f'manual_{uuid4().hex}',
+                'delta': {
+                    'nodes': [
+                        {
+                            'node_id': node_id,
+                            'title': title,
+                            'node_type': node_type,
+                            'summary': summary,
+                            'status': 'published',
+                        }
+                    ],
+                    'edges': [],
+                    'evidence': [],
+                },
+                'published_at': datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self._save_json(self.graph_store_file, graph_rows)
+        return node_id
+
+    def create_manual_edge(self, graph_id: str, edge_id: str, source_node_id: str, target_node_id: str, relation_type: str) -> str:
+        graph_rows = self._load_json(self.graph_store_file)
+        graph_rows.append(
+            {
+                'graph_id': graph_id,
+                'candidate_delta_id': f'manual_{uuid4().hex}',
+                'delta': {
+                    'nodes': [],
+                    'edges': [
+                        {
+                            'edge_id': edge_id,
+                            'source_node_id': source_node_id,
+                            'target_node_id': target_node_id,
+                            'relation_type': relation_type,
+                            'status': 'published',
+                        }
+                    ],
+                    'evidence': [],
+                },
+                'published_at': datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self._save_json(self.graph_store_file, graph_rows)
+        return edge_id
 
     def graph_view(self, graph_id: str) -> FocusGraphResponse:
         graph_rows = self._load_json(self.graph_store_file)

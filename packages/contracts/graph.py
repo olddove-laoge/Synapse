@@ -26,6 +26,7 @@ class GraphNodeCreate(BaseModel):
     node_id: str
     title: str
     node_type: str
+    summary: str = ""
 
 
 class GraphNodePatch(BaseModel):

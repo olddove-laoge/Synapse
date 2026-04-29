@@ -10,7 +10,7 @@
     .panel { padding: 16px; border-right: 1px solid #1f2937; overflow: auto; }
     .panel:last-child { border-right: none; border-left: 1px solid #1f2937; }
     h2, h3 { margin-top: 0; }
-    input, button, textarea { width: 100%; margin: 8px 0; padding: 10px; border-radius: 8px; border: 1px solid #374151; background: #111827; color: #e5e7eb; box-sizing: border-box; }
+    input, button, textarea, select { width: 100%; margin: 8px 0; padding: 10px; border-radius: 8px; border: 1px solid #374151; background: #111827; color: #e5e7eb; box-sizing: border-box; }
     button { cursor: pointer; background: #2563eb; border: none; }
     button.secondary { background: #374151; }
     .graph { position: relative; overflow: hidden; background: radial-gradient(circle at top, #111827, #020617); }
@@ -38,6 +38,16 @@
       <button id="uploadBtn">上传并解析</button>
       <button id="clearGraphBtn" class="secondary" type="button">清空当前图谱</button>
       <div class="status" id="uploadStatus"></div>
+
+      <h3>从零开始</h3>
+      <input id="manualNodeTitle" placeholder="节点名称" />
+      <input id="manualNodeType" placeholder="节点类型，例如 Concept" value="Concept" />
+      <textarea id="manualNodeSummary" rows="3" placeholder="节点摘要（可选）"></textarea>
+      <button id="createNodeBtn" type="button">创建节点</button>
+      <input id="manualEdgeSource" placeholder="关系起点 node_id" />
+      <input id="manualEdgeTarget" placeholder="关系终点 node_id" />
+      <input id="manualEdgeType" placeholder="关系类型，例如 depends_on" />
+      <button id="createEdgeBtn" type="button">创建关系</button>
 
       <h3>候选审核</h3>
       <button class="secondary" id="refreshCandidatesBtn">刷新候选</button>
@@ -120,6 +130,41 @@
       canvas.height = Math.max(1, Math.floor(rect.height * dpr));
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       renderGraph();
+    }
+
+    async function createManualNode() {
+      const title = document.getElementById('manualNodeTitle').value.trim();
+      const nodeType = document.getElementById('manualNodeType').value.trim() || 'Concept';
+      const summary = document.getElementById('manualNodeSummary').value.trim();
+      if (!title) return setStatus(uploadStatus, '请输入节点名称');
+      const nodeId = `manual_${Date.now()}`;
+      await api(`/api/v1/graphs/${getGraphId()}/nodes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node_id: nodeId, title, node_type: nodeType, summary })
+      });
+      document.getElementById('manualNodeTitle').value = '';
+      document.getElementById('manualNodeSummary').value = '';
+      await loadGraph();
+      setStatus(uploadStatus, `已创建节点 ${title}`);
+    }
+
+    async function createManualEdge() {
+      const source = document.getElementById('manualEdgeSource').value.trim();
+      const target = document.getElementById('manualEdgeTarget').value.trim();
+      const relation = document.getElementById('manualEdgeType').value.trim();
+      if (!source || !target || !relation) return setStatus(uploadStatus, '请填写完整关系信息');
+      const edgeId = `manual_edge_${Date.now()}`;
+      await api(`/api/v1/graphs/${getGraphId()}/edges`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ edge_id: edgeId, source_node_id: source, target_node_id: target, relation_type: relation })
+      });
+      document.getElementById('manualEdgeSource').value = '';
+      document.getElementById('manualEdgeTarget').value = '';
+      document.getElementById('manualEdgeType').value = '';
+      await loadGraph();
+      setStatus(uploadStatus, '已创建关系');
     }
 
     async function uploadAndParse() {
@@ -589,6 +634,8 @@
       }
     };
     document.getElementById('uploadBtn').onclick = () => uploadAndParse().catch(err => setStatus(uploadStatus, String(err)));
+    document.getElementById('createNodeBtn').onclick = () => createManualNode().catch(err => setStatus(uploadStatus, String(err)));
+    document.getElementById('createEdgeBtn').onclick = () => createManualEdge().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('refreshCandidatesBtn').onclick = () => refreshCandidates().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('askBtn').onclick = () => askNode().catch(err => setStatus(askStatus, String(err)));
     document.getElementById('saveNoteBtn').onclick = () => saveNodeNote().catch(err => setStatus(askStatus, String(err)));

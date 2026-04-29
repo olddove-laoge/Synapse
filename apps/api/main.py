@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from apps.api.routes import chat, documents, graphs, notes, memory
+from apps.api.routes import chat, documents, graphs, notes, memory, manual_chunks
 
 
 app = FastAPI(title="Synapse API", version="0.1.0")
@@ -20,5 +20,6 @@ def health() -> dict[str, str]:
 app.include_router(documents.router, prefix="/api/v1", tags=["documents"])
 app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
 app.include_router(graphs.router, prefix="/api/v1", tags=["graphs"])
+app.include_router(manual_chunks.router, prefix="/api/v1", tags=["manual_chunks"])
 app.include_router(notes.router, prefix="/api/v1", tags=["notes"])
 app.include_router(memory.router, prefix="/api/v1", tags=["memory"])
