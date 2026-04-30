@@ -23,6 +23,8 @@
     .card { background: #111827; border: 1px solid #374151; border-radius: 10px; padding: 10px; }
     .small { font-size: 12px; color: #9ca3af; }
     .answer { white-space: pre-wrap; line-height: 1.5; }
+    .canvas-menu { position: absolute; z-index: 15; background: rgba(15, 23, 42, 0.98); border: 1px solid #334155; border-radius: 10px; padding: 10px; width: 260px; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+    .canvas-menu input, .canvas-menu textarea, .canvas-menu select { margin: 6px 0; }
   </style>
 </head>
 <body>
@@ -61,6 +63,20 @@
       </div>
       <div class="legend">Canvas 渲染<br>拖动画布平移，滚轮缩放，拖动节点调整布局</div>
       <canvas id="graphCanvas"></canvas>
+      <div id="canvasCreateMenu" class="canvas-menu" style="display:none;">
+        <div class="small">在当前位置创建节点</div>
+        <input id="canvasNodeTitle" placeholder="节点名称" />
+        <select id="canvasNodeType">
+          <option value="Concept">Concept</option>
+          <option value="Method">Method</option>
+          <option value="Question">Question</option>
+          <option value="Insight">Insight</option>
+          <option value="Metric">Metric</option>
+          <option value="Component">Component</option>
+        </select>
+        <textarea id="canvasNodeSummary" rows="3" placeholder="节点摘要（可选）"></textarea>
+        <button id="canvasCreateNodeBtn" type="button">创建节点</button>
+      </div>
     </div>
 
     <div class="panel">
@@ -79,9 +95,14 @@
       <div class="card answer" id="answerBox">等待提问</div>
       <h3>证据引用</h3>
       <div class="list" id="citationList"></div>
-      <h3>节点笔记</h3>
-      <textarea id="noteInput" rows="3" placeholder="为当前节点添加一条笔记"></textarea>
-      <button id="saveNoteBtn">保存笔记</button>
+      <h3>记笔记</h3>
+      <select id="noteKindSelect">
+        <option value="annotation">批注</option>
+        <option value="chunk">知识块</option>
+      </select>
+      <input id="chunkTitleInput" placeholder="知识块标题（仅知识块使用）" style="display:none;" />
+      <textarea id="noteInput" rows="3" placeholder="为当前节点添加内容"></textarea>
+      <button id="saveNoteBtn">保存</button>
       <div class="list" id="noteList"></div>
     </div>
   </div>
@@ -101,7 +122,9 @@
       draggingNodeId: null,
       isPanning: false,
       lastPointer: null,
-      showAll: false,
+      pendingCanvasCreate: null,
+      showAll: true,
+      focusMode: false,
       hitNodes: [],
       layoutKey: '',
       animationFrame: null,
@@ -146,6 +169,42 @@
       document.getElementById('manualNodeTitle').value = '';
       document.getElementById('manualNodeSummary').value = '';
       await loadGraph();
+      setStatus(uploadStatus, `已创建节点 ${title}`);
+    }
+
+    function openCanvasCreateMenu(clientX, clientY) {
+      const menu = document.getElementById('canvasCreateMenu');
+      const graphRect = canvas.parentElement.getBoundingClientRect();
+      menu.style.display = 'block';
+      menu.style.left = `${clientX - graphRect.left}px`;
+      menu.style.top = `${clientY - graphRect.top}px`;
+      document.getElementById('canvasNodeTitle').value = '';
+      document.getElementById('canvasNodeSummary').value = '';
+      document.getElementById('canvasNodeTitle').focus();
+      const rect = canvas.getBoundingClientRect();
+      state.pendingCanvasCreate = {
+        x: (clientX - rect.left - state.panX) / state.zoom,
+        y: (clientY - rect.top - state.panY) / state.zoom,
+      };
+    }
+
+    async function createNodeFromCanvasMenu() {
+      const title = document.getElementById('canvasNodeTitle').value.trim();
+      const nodeType = document.getElementById('canvasNodeType').value;
+      const summary = document.getElementById('canvasNodeSummary').value.trim();
+      if (!title || !state.pendingCanvasCreate) return setStatus(uploadStatus, '请输入节点名称');
+      const nodeId = `manual_${Date.now()}`;
+      await api(`/api/v1/graphs/${getGraphId()}/nodes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node_id: nodeId, title, node_type: nodeType, summary })
+      });
+      state.positions.set(nodeId, { x: state.pendingCanvasCreate.x, y: state.pendingCanvasCreate.y, vx: 0, vy: 0 });
+      document.getElementById('canvasCreateMenu').style.display = 'none';
+      state.pendingCanvasCreate = null;
+      await loadGraph();
+      const created = state.graph.nodes.find(n => n.node_id === nodeId);
+      if (created) await selectNode(created);
       setStatus(uploadStatus, `已创建节点 ${title}`);
     }
 
@@ -246,7 +305,7 @@
     }
 
     function filteredGraph() {
-      if (state.showAll || !state.selectedNode) return state.graph;
+      if (!state.focusMode || !state.selectedNode) return state.graph;
       const centerId = state.selectedNode.node_id;
       const relatedEdges = state.graph.edges.filter(edge => edge.source_node_id === centerId || edge.target_node_id === centerId);
       const nodeIds = new Set([centerId]);
@@ -436,28 +495,23 @@
         ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
         ctx.fillStyle = isSelected ? '#38bdf8' : nodeColor(node);
         ctx.fill();
-        const shouldLabel = isSelected || degree >= 2 || (!state.showAll && state.zoom >= 0.75);
-        if (shouldLabel) {
-          ctx.fillStyle = '#e2e8f0';
-          ctx.font = isSelected ? '13px Arial' : '11px Arial';
-          ctx.textAlign = 'center';
-          ctx.fillText(node.title.slice(0, 18), pos.x, pos.y - radius - 8);
-        }
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = isSelected ? '13px Arial' : '11px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(node.title.slice(0, 18), pos.x, pos.y - radius - 8);
         state.hitNodes.push({ node, x: pos.x, y: pos.y, radius });
       });
     }
 
     async function selectNode(node) {
       state.selectedNode = node;
-      state.showAll = false;
       document.getElementById('selectedNodeCard').innerHTML = `<div><strong>${node.title}</strong></div><div class="small">${node.node_type} · ${node.node_id}</div><div class="small" style="margin-top:8px;line-height:1.5;">${node.summary || '摘要生成中...'}</div>`;
-      markLayoutDirty();
       renderGraph();
       const pos = state.positions.get(node.node_id);
       if (pos) {
         const width = canvas.clientWidth || 900;
         const height = canvas.clientHeight || window.innerHeight;
-        state.targetZoom = 1.18;
+        state.targetZoom = 1.05;
         state.targetPanX = width / 2 - pos.x * state.targetZoom;
         state.targetPanY = height / 2 - pos.y * state.targetZoom;
         animateCamera();
@@ -480,30 +534,73 @@
       }
     }
 
+    async function enterFocusNode(node) {
+      state.selectedNode = node;
+      state.focusMode = true;
+      const focus = await api(`/api/v1/graphs/${getGraphId()}/focus?node_id=${encodeURIComponent(node.node_id)}`);
+      state.graph.nodes = mergeNodes(state.graph.nodes, focus.nodes);
+      state.graph.edges = mergeEdges(state.graph.edges, focus.edges);
+      markLayoutDirty();
+      renderGraph();
+      const pos = state.positions.get(node.node_id);
+      if (pos) {
+        const width = canvas.clientWidth || 900;
+        const height = canvas.clientHeight || window.innerHeight;
+        state.targetZoom = 1.18;
+        state.targetPanX = width / 2 - pos.x * state.targetZoom;
+        state.targetPanY = height / 2 - pos.y * state.targetZoom;
+        animateCamera();
+      }
+    }
+
     async function loadNodeNotes(nodeId) {
-      const rows = await api(`/api/v1/nodes/${encodeURIComponent(nodeId)}/notes`);
+      const noteRows = await api(`/api/v1/nodes/${encodeURIComponent(nodeId)}/notes`);
+      const chunkRows = await api(`/api/v1/graphs/${getGraphId()}/manual-chunks`);
       const noteList = document.getElementById('noteList');
       noteList.innerHTML = '';
-      rows.forEach(note => {
+      noteRows.forEach(note => {
         const card = document.createElement('div');
         card.className = 'card';
-        card.innerHTML = `<div class="small">${note.note_id}</div><div>${note.content}</div>`;
+        card.innerHTML = `<div class="small">批注</div><div>${note.content}</div>`;
+        noteList.appendChild(card);
+      });
+      chunkRows.filter(chunk => (chunk.linked_node_ids || []).includes(nodeId)).forEach(chunk => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `<div class="small">知识块 · ${chunk.title}</div><div>${chunk.content}</div>`;
         noteList.appendChild(card);
       });
     }
 
     async function saveNodeNote() {
       if (!state.selectedNode) return setStatus(askStatus, '请先点击图谱节点');
+      const kind = document.getElementById('noteKindSelect').value;
       const content = document.getElementById('noteInput').value.trim();
-      if (!content) return setStatus(askStatus, '请输入笔记内容');
-      await api(`/api/v1/nodes/${encodeURIComponent(state.selectedNode.node_id)}/notes`, {
+      if (!content) return setStatus(askStatus, '请输入内容');
+
+      if (kind === 'annotation') {
+        await api(`/api/v1/nodes/${encodeURIComponent(state.selectedNode.node_id)}/notes`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content })
+        });
+        document.getElementById('noteInput').value = '';
+        await loadNodeNotes(state.selectedNode.node_id);
+        setStatus(askStatus, '批注已保存');
+        return;
+      }
+
+      const title = document.getElementById('chunkTitleInput').value.trim();
+      if (!title) return setStatus(askStatus, '请输入知识块标题');
+      await api(`/api/v1/graphs/${getGraphId()}/manual-chunks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content })
+        body: JSON.stringify({ title, content, linked_node_ids: [state.selectedNode.node_id] })
       });
       document.getElementById('noteInput').value = '';
+      document.getElementById('chunkTitleInput').value = '';
       await loadNodeNotes(state.selectedNode.node_id);
-      setStatus(askStatus, '笔记已保存');
+      setStatus(askStatus, '知识块已保存');
     }
 
     async function askNode() {
@@ -569,13 +666,32 @@
       renderGraph();
     });
 
+    canvas.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      const hit = pickNode(event.clientX, event.clientY);
+      if (hit) return;
+      openCanvasCreateMenu(event.clientX, event.clientY);
+    });
+
+    canvas.addEventListener('click', event => {
+      const hit = pickNode(event.clientX, event.clientY);
+      if (!hit) return;
+      selectNode(hit).catch(err => setStatus(uploadStatus, String(err)));
+    });
+
+    canvas.addEventListener('dblclick', event => {
+      const hit = pickNode(event.clientX, event.clientY);
+      if (!hit) return;
+      enterFocusNode(hit).catch(err => setStatus(uploadStatus, String(err)));
+    });
+
     canvas.addEventListener('pointerdown', event => {
+      document.getElementById('canvasCreateMenu').style.display = 'none';
       if (state.animationFrame) cancelAnimationFrame(state.animationFrame);
       const hit = pickNode(event.clientX, event.clientY);
       state.lastPointer = { x: event.clientX, y: event.clientY };
       if (hit) {
         state.draggingNodeId = hit.node_id;
-        selectNode(hit);
         return;
       }
       state.isPanning = true;
@@ -612,7 +728,10 @@
       animateCamera();
     };
     document.getElementById('showAllBtn').onclick = () => {
-      state.showAll = !state.showAll; markLayoutDirty(); renderGraph();
+      state.focusMode = false;
+      state.showAll = !state.showAll;
+      markLayoutDirty();
+      renderGraph();
     };
     document.getElementById('clearGraphBtn').onclick = async () => {
       try {
@@ -636,9 +755,13 @@
     document.getElementById('uploadBtn').onclick = () => uploadAndParse().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('createNodeBtn').onclick = () => createManualNode().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('createEdgeBtn').onclick = () => createManualEdge().catch(err => setStatus(uploadStatus, String(err)));
+    document.getElementById('canvasCreateNodeBtn').onclick = () => createNodeFromCanvasMenu().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('refreshCandidatesBtn').onclick = () => refreshCandidates().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('askBtn').onclick = () => askNode().catch(err => setStatus(askStatus, String(err)));
     document.getElementById('saveNoteBtn').onclick = () => saveNodeNote().catch(err => setStatus(askStatus, String(err)));
+    document.getElementById('noteKindSelect').onchange = (event) => {
+      document.getElementById('chunkTitleInput').style.display = event.target.value === 'chunk' ? 'block' : 'none';
+    };
 
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
