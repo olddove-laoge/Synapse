@@ -18,6 +18,9 @@
     .toolbar { position: absolute; left: 16px; top: 16px; z-index: 5; display: flex; gap: 8px; }
     .toolbar button { width: auto; padding: 8px 12px; margin: 0; background: rgba(15, 23, 42, 0.9); border: 1px solid #334155; }
     .legend { position: absolute; left: 16px; bottom: 16px; z-index: 5; background: rgba(15, 23, 42, 0.86); border: 1px solid #334155; border-radius: 10px; padding: 10px 12px; font-size: 12px; color: #cbd5e1; }
+    .mini-path { position: absolute; right: 16px; top: 16px; z-index: 10; width: 280px; background: rgba(15, 23, 42, 0.94); border: 1px solid #334155; border-radius: 12px; padding: 10px; }
+    .mini-path-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; }
+    .mini-path-header button { width: auto; margin: 0; padding: 4px 10px; background: transparent; border: 1px solid #475569; }
     .status { font-size: 12px; color: #93c5fd; min-height: 18px; }
     .list { display: grid; gap: 8px; }
     .card { background: #111827; border: 1px solid #374151; border-radius: 10px; padding: 10px; }
@@ -63,6 +66,13 @@
       </div>
       <div class="legend">Canvas 渲染<br>拖动画布平移，滚轮缩放，拖动节点调整布局</div>
       <canvas id="graphCanvas"></canvas>
+      <div id="miniPathPanel" class="mini-path" style="display:none;">
+        <div class="mini-path-header">
+          <span>学习链路</span>
+          <button id="closeMiniPathBtn" type="button">×</button>
+        </div>
+        <canvas id="miniPathCanvas" width="260" height="180" style="width:100%;height:180px;display:block;"></canvas>
+      </div>
       <div id="canvasCreateMenu" class="canvas-menu" style="display:none;">
         <div class="small">在当前位置创建节点</div>
         <input id="canvasNodeTitle" placeholder="节点名称" />
@@ -76,6 +86,11 @@
         </select>
         <textarea id="canvasNodeSummary" rows="3" placeholder="节点摘要（可选）"></textarea>
         <button id="canvasCreateNodeBtn" type="button">创建节点</button>
+      </div>
+      <div id="canvasEdgeMenu" class="canvas-menu" style="display:none;">
+        <div class="small">输入关系名称</div>
+        <input id="canvasEdgeType" placeholder="例如 depends_on" />
+        <button id="canvasCreateEdgeBtn" type="button">创建关系</button>
       </div>
     </div>
 
@@ -123,8 +138,13 @@
       isPanning: false,
       lastPointer: null,
       pendingCanvasCreate: null,
+      pendingEdgeSource: null,
+      pendingEdgeTarget: null,
       showAll: true,
       focusMode: false,
+      learningPathNodeIds: new Set(),
+      learningPathEdgeIds: new Set(),
+      learningPathMini: { nodes: [], edges: [], hitNodes: [] },
       hitNodes: [],
       layoutKey: '',
       animationFrame: null,
@@ -188,6 +208,28 @@
       };
     }
 
+    function openCanvasEdgeMenu(clientX, clientY, sourceNodeId, targetNodeId) {
+      const menu = document.getElementById('canvasEdgeMenu');
+      const graphRect = canvas.parentElement.getBoundingClientRect();
+      menu.style.display = 'block';
+      menu.style.left = `${clientX - graphRect.left}px`;
+      menu.style.top = `${clientY - graphRect.top}px`;
+      document.getElementById('canvasEdgeType').value = '';
+      document.getElementById('canvasEdgeType').focus();
+      state.pendingEdgeSource = sourceNodeId;
+      state.pendingEdgeTarget = targetNodeId;
+    }
+
+    async function createEdgeFromCanvasMenu() {
+      const relation = document.getElementById('canvasEdgeType').value.trim();
+      if (!relation || !state.pendingEdgeSource || !state.pendingEdgeTarget) return setStatus(uploadStatus, '请输入关系名称');
+      await createManualEdge(state.pendingEdgeSource, state.pendingEdgeTarget, relation);
+      document.getElementById('canvasEdgeMenu').style.display = 'none';
+      state.pendingEdgeSource = null;
+      state.pendingEdgeTarget = null;
+      setStatus(uploadStatus, '已创建关系');
+    }
+
     async function createNodeFromCanvasMenu() {
       const title = document.getElementById('canvasNodeTitle').value.trim();
       const nodeType = document.getElementById('canvasNodeType').value;
@@ -208,10 +250,10 @@
       setStatus(uploadStatus, `已创建节点 ${title}`);
     }
 
-    async function createManualEdge() {
-      const source = document.getElementById('manualEdgeSource').value.trim();
-      const target = document.getElementById('manualEdgeTarget').value.trim();
-      const relation = document.getElementById('manualEdgeType').value.trim();
+    async function createManualEdge(sourceArg = null, targetArg = null, relationArg = null) {
+      const source = sourceArg || document.getElementById('manualEdgeSource').value.trim();
+      const target = targetArg || document.getElementById('manualEdgeTarget').value.trim();
+      const relation = relationArg || document.getElementById('manualEdgeType').value.trim();
       if (!source || !target || !relation) return setStatus(uploadStatus, '请填写完整关系信息');
       const edgeId = `manual_edge_${Date.now()}`;
       await api(`/api/v1/graphs/${getGraphId()}/edges`, {
@@ -456,6 +498,103 @@
       state.animationFrame = requestAnimationFrame(tick);
     }
 
+    function renderMiniPath() {
+      const miniCanvas = document.getElementById('miniPathCanvas');
+      const miniCtx = miniCanvas.getContext('2d');
+      const rect = miniCanvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      miniCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+      miniCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
+      miniCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      miniCtx.clearRect(0, 0, rect.width, rect.height);
+      const nodes = state.learningPathMini.nodes || [];
+      const edges = state.learningPathMini.edges || [];
+      state.learningPathMini.hitNodes = [];
+      if (!nodes.length) return;
+
+      const centerX = rect.width / 2;
+      const centerY = rect.height / 2;
+      const positions = new Map();
+      nodes.forEach((node, idx) => {
+        const angle = (Math.PI * 2 * idx) / Math.max(1, nodes.length);
+        const radius = 34 + (idx % 3) * 18;
+        positions.set(node.node_id, { x: centerX + radius * Math.cos(angle), y: centerY + radius * Math.sin(angle), vx: 0, vy: 0 });
+      });
+
+      for (let step = 0; step < 80; step++) {
+        for (let i = 0; i < nodes.length; i++) {
+          const a = positions.get(nodes[i].node_id);
+          if (!a) continue;
+          for (let j = i + 1; j < nodes.length; j++) {
+            const b = positions.get(nodes[j].node_id);
+            if (!b) continue;
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let dist = Math.hypot(dx, dy) || 1;
+            const repel = 1200 / dist;
+            const ux = dx / dist;
+            const uy = dy / dist;
+            a.vx -= ux * repel * 0.0015;
+            a.vy -= uy * repel * 0.0015;
+            b.vx += ux * repel * 0.0015;
+            b.vy += uy * repel * 0.0015;
+          }
+        }
+        edges.forEach(edge => {
+          const a = positions.get(edge.source_node_id);
+          const b = positions.get(edge.target_node_id);
+          if (!a || !b) return;
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          let dist = Math.hypot(dx, dy) || 1;
+          const spring = (dist - 70) * 0.02;
+          const ux = dx / dist;
+          const uy = dy / dist;
+          a.vx += ux * spring;
+          a.vy += uy * spring;
+          b.vx -= ux * spring;
+          b.vy -= uy * spring;
+        });
+        nodes.forEach(node => {
+          const pos = positions.get(node.node_id);
+          if (!pos) return;
+          pos.vx += (centerX - pos.x) * 0.003;
+          pos.vy += (centerY - pos.y) * 0.003;
+          pos.x += pos.vx;
+          pos.y += pos.vy;
+          pos.vx *= 0.82;
+          pos.vy *= 0.82;
+        });
+      }
+
+      edges.forEach(edge => {
+        const a = positions.get(edge.source_node_id);
+        const b = positions.get(edge.target_node_id);
+        if (!a || !b) return;
+        miniCtx.beginPath();
+        miniCtx.moveTo(a.x, a.y);
+        miniCtx.lineTo(b.x, b.y);
+        miniCtx.strokeStyle = '#e2e8f0';
+        miniCtx.lineWidth = 2.2;
+        miniCtx.stroke();
+      });
+
+      nodes.forEach(node => {
+        const pos = positions.get(node.node_id);
+        if (!pos) return;
+        const radius = 13;
+        miniCtx.beginPath();
+        miniCtx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+        miniCtx.fillStyle = nodeColor(node);
+        miniCtx.fill();
+        miniCtx.fillStyle = '#e2e8f0';
+        miniCtx.font = '10px Arial';
+        miniCtx.textAlign = 'center';
+        miniCtx.fillText(node.title.slice(0, 10), pos.x, pos.y - 18);
+        state.learningPathMini.hitNodes.push({ node, x: pos.x, y: pos.y, radius });
+      });
+    }
+
     function renderGraph() {
       const width = canvas.clientWidth || 900;
       const height = canvas.clientHeight || window.innerHeight;
@@ -473,8 +612,9 @@
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
-        ctx.strokeStyle = edgeColor(edge);
-        ctx.lineWidth = state.selectedNode && (edge.source_node_id === state.selectedNode.node_id || edge.target_node_id === state.selectedNode.node_id) ? 3 : 1.5;
+        const inLearningPath = state.learningPathEdgeIds.has(edge.edge_id);
+        ctx.strokeStyle = inLearningPath ? '#f8fafc' : edgeColor(edge);
+        ctx.lineWidth = inLearningPath ? 4 : (state.selectedNode && (edge.source_node_id === state.selectedNode.node_id || edge.target_node_id === state.selectedNode.node_id) ? 3 : 1.5);
         ctx.stroke();
         if (state.selectedNode && (edge.source_node_id === state.selectedNode.node_id || edge.target_node_id === state.selectedNode.node_id)) {
           ctx.fillStyle = '#94a3b8';
@@ -489,11 +629,12 @@
         if (!pos0) return;
         const pos = toViewport(pos0);
         const isSelected = state.selectedNode?.node_id === node.node_id;
+        const inLearningPath = state.learningPathNodeIds.has(node.node_id);
         const degree = subgraph.edges.filter(edge => edge.source_node_id === node.node_id || edge.target_node_id === node.node_id).length;
         const radius = nodeRadius(node, degree, isSelected);
         ctx.beginPath();
         ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = isSelected ? '#38bdf8' : nodeColor(node);
+        ctx.fillStyle = isSelected ? '#38bdf8' : (inLearningPath ? '#f8fafc' : nodeColor(node));
         ctx.fill();
         ctx.fillStyle = '#e2e8f0';
         ctx.font = isSelected ? '13px Arial' : '11px Arial';
@@ -501,6 +642,7 @@
         ctx.fillText(node.title.slice(0, 18), pos.x, pos.y - radius - 8);
         state.hitNodes.push({ node, x: pos.x, y: pos.y, radius });
       });
+      renderMiniPath();
     }
 
     async function selectNode(node) {
@@ -625,7 +767,37 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-        document.getElementById('answerBox').textContent = result.agent_output || '未返回代理分析';
+        const extra = result.learning_hint ? `\n\n[学习提示]\n${result.learning_hint}` : '';
+        document.getElementById('answerBox').textContent = (result.answer || '未返回回答') + extra;
+        citationList.innerHTML = '';
+        result.retrieved_passages?.forEach(item => {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `<div class="small">证据块 · ${item.chunk_id}</div><div>${item.content.slice(0, 140)}...</div>`;
+          citationList.appendChild(card);
+        });
+        result.related_chunks?.forEach(item => {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `<div class="small">相关知识块 · ${item.title}</div><div>${item.content}</div>`;
+          citationList.appendChild(card);
+        });
+        result.related_notes?.forEach(item => {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `<div class="small">相关批注</div><div>${item.content}</div>`;
+          citationList.appendChild(card);
+        });
+        state.learningPathNodeIds = new Set((result.learning_path_nodes || []).map(node => node.node_id));
+        state.learningPathEdgeIds = new Set((result.learning_path_edges || []).map(edge => edge.edge_id));
+        state.learningPathMini = {
+          nodes: result.learning_path_nodes || [],
+          edges: result.learning_path_edges || [],
+          hitNodes: [],
+        };
+        document.getElementById('miniPathPanel').style.display = (result.learning_path_nodes || []).length ? 'block' : 'none';
+        markLayoutDirty();
+        renderGraph();
         setStatus(askStatus, '递归学习代理完成');
         return;
       }
@@ -669,11 +841,22 @@
     canvas.addEventListener('contextmenu', event => {
       event.preventDefault();
       const hit = pickNode(event.clientX, event.clientY);
-      if (hit) return;
+      if (hit) {
+        if (!state.pendingEdgeSource) {
+          state.pendingEdgeSource = hit.node_id;
+          setStatus(uploadStatus, `已选择起点节点：${hit.title}`);
+          return;
+        }
+        if (state.pendingEdgeSource !== hit.node_id) {
+          openCanvasEdgeMenu(event.clientX, event.clientY, state.pendingEdgeSource, hit.node_id);
+          return;
+        }
+      }
       openCanvasCreateMenu(event.clientX, event.clientY);
     });
 
     canvas.addEventListener('click', event => {
+      if (state.draggingNodeId) return;
       const hit = pickNode(event.clientX, event.clientY);
       if (!hit) return;
       selectNode(hit).catch(err => setStatus(uploadStatus, String(err)));
@@ -756,11 +939,28 @@
     document.getElementById('createNodeBtn').onclick = () => createManualNode().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('createEdgeBtn').onclick = () => createManualEdge().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('canvasCreateNodeBtn').onclick = () => createNodeFromCanvasMenu().catch(err => setStatus(uploadStatus, String(err)));
+    document.getElementById('canvasCreateEdgeBtn').onclick = () => createEdgeFromCanvasMenu().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('refreshCandidatesBtn').onclick = () => refreshCandidates().catch(err => setStatus(uploadStatus, String(err)));
     document.getElementById('askBtn').onclick = () => askNode().catch(err => setStatus(askStatus, String(err)));
     document.getElementById('saveNoteBtn').onclick = () => saveNodeNote().catch(err => setStatus(askStatus, String(err)));
     document.getElementById('noteKindSelect').onchange = (event) => {
       document.getElementById('chunkTitleInput').style.display = event.target.value === 'chunk' ? 'block' : 'none';
+    };
+    document.getElementById('miniPathCanvas').onclick = event => {
+      const rect = event.target.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const hit = (state.learningPathMini.hitNodes || []).find(item => Math.hypot(item.x - x, item.y - y) <= item.radius);
+      if (hit) {
+        selectNode(hit.node).catch(err => setStatus(askStatus, String(err)));
+      }
+    };
+    document.getElementById('closeMiniPathBtn').onclick = () => {
+      document.getElementById('miniPathPanel').style.display = 'none';
+      state.learningPathNodeIds = new Set();
+      state.learningPathEdgeIds = new Set();
+      state.learningPathMini = { nodes: [], edges: [], hitNodes: [] };
+      renderGraph();
     };
 
     window.addEventListener('resize', resizeCanvas);

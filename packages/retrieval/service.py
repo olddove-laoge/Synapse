@@ -22,6 +22,8 @@ class RetrievalService(Protocol):
 
     def retrieve_for_node(self, graph_id: str, node_id: str, query: str) -> RetrievalResult: ...
 
+    def list_facts(self, graph_id: str) -> list[FactRecord]: ...
+
     def update_index(self, graph_id: str, delta: GraphDelta) -> None: ...
 
 
@@ -471,6 +473,9 @@ class LocalEmbeddingRetrievalService:
 
     def retrieve_for_node(self, graph_id: str, node_id: str, query: str) -> RetrievalResult:
         return self._node_centric_retrieve(graph_id=graph_id, node_id=node_id, query=query)
+
+    def list_facts(self, graph_id: str) -> list[FactRecord]:
+        return self._filter_facts_for_graph(self._load_facts(), graph_id=graph_id)
 
     def update_index(self, graph_id: str, delta: GraphDelta) -> None:
         return None

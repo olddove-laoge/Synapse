@@ -3,7 +3,8 @@ from typing import Protocol
 from pydantic import BaseModel
 
 from packages.contracts.document import ParsedChunk
-from packages.contracts.graph import GraphDelta, CandidateNode, CandidateEdge, EvidenceItem
+from packages.contracts.graph import GraphDelta
+from packages.extraction.hipporag_openie_adapter import HippoRAGOpenIEAdapter
 
 
 class ChatTurn(BaseModel):
@@ -18,8 +19,11 @@ class ExtractionService(Protocol):
 
 
 class LocalExtractionService:
+    def __init__(self) -> None:
+        self._openie_adapter = HippoRAGOpenIEAdapter()
+
     def extract_from_chunks(self, chunks: list[ParsedChunk]) -> GraphDelta:
-        return GraphDelta()
+        return self._openie_adapter.extract_from_chunks(chunks)
 
     def extract_from_chat(self, question: str, answer: str, citations: list[dict]) -> GraphDelta:
         q = question.strip()
@@ -27,55 +31,13 @@ class LocalExtractionService:
         if not q or not a:
             return GraphDelta(nodes=[], edges=[], evidence=[])
 
-        if len(q) < 3 or len(a) < 20:
-            return GraphDelta(nodes=[], edges=[], evidence=[])
+        chat_text = f"Question: {q}\n\nAnswer: {a}"
+        chat_chunk = ParsedChunk(
+            chunk_id=f"chat_{abs(hash(chat_text)) % 10**12}",
+            document_id="chat_session",
+            content=chat_text,
+            source_type="chat",
+            metadata={"citations": citations},
+        )
 
-        if "不知道" in a and len(citations) == 0:
-            return GraphDelta(nodes=[], edges=[], evidence=[])
-
-        q_node_id = f"node_q_{abs(hash(q)) % 10**10}"
-        a_node_id = f"node_a_{abs(hash(a[:300])) % 10**10}"
-
-        nodes = [
-            CandidateNode(
-                node_id=q_node_id,
-                title=q[:80],
-                node_type="Question",
-                status="draft",
-            ),
-            CandidateNode(
-                node_id=a_node_id,
-                title=a[:120],
-                node_type="Insight",
-                status="draft",
-            ),
-        ]
-
-        edges = [
-            CandidateEdge(
-                edge_id=f"edge_{q_node_id}_{a_node_id}",
-                source_node_id=q_node_id,
-                target_node_id=a_node_id,
-                relation_type="answered_by",
-                status="draft",
-            )
-        ]
-
-        evidence = []
-        for item in citations:
-            chunk_id = item.get("chunk_id")
-            score = float(item.get("score", 0.0))
-            if (not chunk_id) or score < 0.25:
-                continue
-            evidence.append(
-                EvidenceItem(
-                    evidence_id=f"ev_{chunk_id}",
-                    chunk_id=chunk_id,
-                    score=score,
-                )
-            )
-
-        if not evidence:
-            return GraphDelta(nodes=[], edges=[], evidence=[])
-
-        return GraphDelta(nodes=nodes, edges=edges, evidence=evidence)
+        return self._openie_adapter.extract_from_chunks([chat_chunk])
